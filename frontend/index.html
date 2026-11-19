@@ -22,7 +22,7 @@
   .seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .seg button{border:0;background:transparent;padding:9px 12px;cursor:pointer}
   .seg button.on{background:var(--blue);color:#fff}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
   .card h3{margin:0;font-size:12px;color:#64748b;font-weight:500}
   .card strong{display:block;font-family:"Segoe UI",system-ui,sans-serif;font-size:28px;margin-top:6px}
@@ -36,6 +36,12 @@
   .timeline{border-left:2px solid #cbd5e1;margin-left:8px;padding-left:14px}
   .timeline .item{margin-bottom:12px;position:relative}
   .timeline .item:before{content:"";position:absolute;left:-19px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--blue)}
+  .seal{display:inline-flex;align-items:center;gap:6px;background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;border-radius:999px;padding:5px 12px;font-size:12px;margin-bottom:10px}
+  .seal b{font-weight:600}
+  .batch{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#64748b}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;background:#e0e7ff;color:#3730a3}
+  .tag.fight{background:#fee2e2;color:#991b1b}
+  .tag.bias{background:#fef3c7;color:#92400e}
 </style>
 </head>
 <body>
@@ -59,11 +65,12 @@ createApp({
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const sources=ref([]), arrivals=ref([]), catchups=ref([]);
+    const summary=ref({}), ledger=ref([]), events=ref([]), half=ref(null);
+    const detail=ref(null), detailSource=ref('订单源');
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','滞后分级','补齐恢复'];
-    const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
-    const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
+    const nav=['到达登记','滞后分级','补齐恢复','源详情','对账账册'];
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
+    function eventClass(k){return k==='半成争用'?'fight':(k==='半成偏了'?'bias':'');}
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -80,6 +87,11 @@ createApp({
       if(r.status===401){ logout(); return null; }
       return j;
     }
+    async function loadDetail(){
+      if(!detailSource.value) return;
+      const d=await loadJson('/api/sources/'+encodeURIComponent(detailSource.value)+'/detail');
+      if(d) detail.value=d;
+    }
     async function refresh(){
       if(!token.value) return;
       const s=await loadJson('/api/sources'); if(s===null) return;
@@ -88,29 +100,40 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
+      const m=await loadJson('/api/summary'); if(m) summary.value=m;
+      const l=await loadJson('/api/ledger'); if(l) ledger.value=Array.isArray(l.items)?l.items:[];
+      const e=await loadJson('/api/half-success/events'); if(e) events.value=Array.isArray(e.items)?e.items:[];
+      const hf=await loadJson('/api/half-success'); if(hf) half.value=hf;
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
+      if(sources.value.length && !sources.value.find(x=>x.name===detailSource.value)) detailSource.value=sources.value[0].name;
+      await loadDetail();
     }
     async function recordArrival(){
       actionErr.value='';
       const r=await fetch('/api/arrivals',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`):(j.detail||'失败');
+      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode} · 批 ${j.batch_id}`):(j.detail||'失败');
       await refresh();
     }
-    async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
+    async function doCatchup(name){
+      actionErr.value='';
+      const r=await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});
+      const j=await r.json().catch(()=>({})); if(!r.ok) actionErr.value=j.detail||'失败';
+      await refresh();
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,summary,ledger,events,half,detail,detailSource,form,actionErr,modeClass,eventClass,login,logout,recordArrival,doCatchup,loadDetail};
   },
   template:`
   <div v-if="!token" class="login">
     <h1 style="margin:0 0 8px">源到达SLA</h1>
-    <p style="color:#64748b">多源到达时钟对照 SLA，超限冻结或降级，补齐后恢复。</p>
+    <p style="color:#64748b">多源到达时钟对照 SLA,超限冻结或降级,补齐后恢复。</p>
     <label>用户名</label><input v-model="username"/><label>密码</label><input type="password" v-model="password"/>
     <div class="err">{{err}}</div><button class="primary" style="width:100%" @click="login">打开监控面</button>
   </div>
   <div v-if="token" class="wrap">
     <aside>
       <h1>源到达SLA</h1>
-      <p>左侧是各源当前输出态；右侧登记到达并做补齐恢复。</p>
+      <p>左侧是各源当前输出态;右侧登记到达并做补齐恢复。到达与源态同批绑定,五处对齐。</p>
       <div class="src" v-for="s in sources" :key="s.id">
         <b>{{s.name}}</b>
         <span>SLA {{s.sla_minutes}} 分钟</span>
@@ -123,12 +146,14 @@ createApp({
         <div class="seg"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{n}}</button></div>
       </div>
       <div class="cards">
-        <div class="card"><h3>源数量</h3><strong>{{sources.length}}</strong></div>
-        <div class="card"><h3>冻结中</h3><strong>{{frozen}}</strong></div>
-        <div class="card"><h3>降级只读</h3><strong>{{degraded}}</strong></div>
+        <div class="card"><h3>源数量</h3><strong>{{summary.sources??sources.length}}</strong></div>
+        <div class="card"><h3>冻结中</h3><strong>{{summary.frozen??0}}</strong></div>
+        <div class="card"><h3>降级只读</h3><strong>{{summary.degraded??0}}</strong></div>
+        <div class="card"><h3>半成争用</h3><strong>{{summary.contentions??0}}</strong></div>
       </div>
       <div class="card" v-show="tab===0">
         <h3 style="margin-bottom:8px">登记到达</h3>
+        <div class="seal" v-if="half">半成切断:<b>{{half.active}}</b>&nbsp;生效 · {{half.inactive}} 未启用 · 乙路径已封存 {{half.sealed_on}}</div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
           <div><label>源</label><select v-model="form.source"><option v-for="s in sources" :value="s.name">{{s.name}}</option></select></div>
           <div><label>源时钟</label><input v-model="form.source_clock"/></div>
@@ -140,12 +165,13 @@ createApp({
           <div class="item" v-for="a in (arrivals||[]).slice(0,8)" :key="a.id">
             <b>{{a.source}}</b> · 滞后 {{a.lag_minutes}} 分 · {{a.level}}
             <div style="color:#64748b;font-size:12px">{{a.source_clock}} → {{a.ingest_clock}}</div>
+            <div class="batch">批 {{a.batch_id}}</div>
           </div>
         </div>
       </div>
       <div class="card" v-show="tab===1">
         <h3>分级规则</h3>
-        <p style="color:#64748b;font-size:13px">≤SLA 正常可写；≤2×SLA 告警降级只读；更久违约冻结。</p>
+        <p style="color:#64748b;font-size:13px">≤SLA 正常可写;≤2×SLA 告警降级只读;更久违约冻结。</p>
         <table><thead><tr><th>源</th><th>SLA</th><th>输出态</th><th></th></tr></thead>
         <tbody><tr v-for="s in sources" :key="'g'+s.id">
           <td>{{s.name}}</td><td>{{s.sla_minutes}}</td><td>{{s.output_mode}}</td>
@@ -154,8 +180,39 @@ createApp({
       </div>
       <div class="card" v-show="tab===2">
         <h3>补齐记录</h3>
-        <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
-        <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+        <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>批号</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td class="batch">{{x.batch_id}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+      </div>
+      <div class="card" v-show="tab===3">
+        <h3>源详情</h3>
+        <label>源</label>
+        <select v-model="detailSource" @change="loadDetail" style="max-width:240px"><option v-for="s in sources" :value="s.name">{{s.name}}</option></select>
+        <div v-if="detail">
+          <p style="font-size:13px">当前输出态:<span class="mode" :class="modeClass(detail.source.output_mode)">{{detail.source.output_mode}}</span></p>
+          <h3>到达</h3>
+          <table><thead><tr><th>#</th><th>滞后</th><th>级别</th><th>批号</th></tr></thead>
+          <tbody><tr v-for="a in detail.arrivals" :key="'da'+a.id"><td>{{a.id}}</td><td>{{a.lag_minutes}} 分</td><td>{{a.level}}</td><td class="batch">{{a.batch_id}}</td></tr></tbody></table>
+          <h3 style="margin-top:12px">源态变迁</h3>
+          <table><thead><tr><th>#</th><th>输出态</th><th>批号</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="st in detail.states" :key="'ds'+st.id"><td>{{st.id}}</td><td>{{st.output_mode}}</td><td class="batch">{{st.batch_id}}</td><td>{{st.created_at}}</td></tr></tbody></table>
+          <h3 style="margin-top:12px">半成事件</h3>
+          <table><thead><tr><th>类别</th><th>详情</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="e in detail.events" :key="'de'+e.id"><td><span class="tag" :class="eventClass(e.kind)">{{e.kind}}</span></td><td>{{e.detail}}</td><td>{{e.created_at}}</td></tr></tbody></table>
+        </div>
+      </div>
+      <div class="card" v-show="tab===4">
+        <h3>对账账册</h3>
+        <p style="color:#64748b;font-size:13px">源态变迁与到达/补齐同批对账;半成争用与偏离留痕在下方。</p>
+        <table><thead><tr><th>批号</th><th>类型</th><th>源</th><th>输出态</th><th>到达#</th><th>补齐#</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="x in ledger" :key="'l'+x.id">
+          <td class="batch">{{x.batch_id}}</td><td>{{x.kind}}</td><td>{{x.source}}</td><td>{{x.output_mode}}</td>
+          <td>{{x.arrival_id||''}}</td><td>{{x.catchup_id||''}}</td><td>{{x.created_at}}</td>
+        </tr></tbody></table>
+        <h3 style="margin-top:14px">半成事件留痕</h3>
+        <table><thead><tr><th>类别</th><th>源</th><th>详情</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="e in events" :key="'e'+e.id">
+          <td><span class="tag" :class="eventClass(e.kind)">{{e.kind}}</span></td><td>{{e.source}}</td><td>{{e.detail}}</td><td>{{e.created_at}}</td>
+        </tr></tbody></table>
       </div>
     </main>
   </div>`
